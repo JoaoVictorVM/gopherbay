@@ -18,9 +18,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
 	"github.com/charmbracelet/x/xpty"
 )
@@ -139,7 +142,12 @@ func main() {
 	relogio := flag.String("relogio", "clock-tty --24h", "linha de comando do relógio")
 	jogo := flag.String("jogo", "snake", "linha de comando do jogo")
 	uso := flag.String("uso", "usage-bar", "linha de comando da barra de uso")
+	amostra := flag.Bool("amostra", false, "roda o programa de amostra no lugar da interface")
 	flag.Parse()
+
+	if *amostra {
+		os.Exit(runSample())
+	}
 
 	os.Exit(run([]entry{
 		{key: "relogio", label: "Relógio", command: *relogio},
@@ -545,4 +553,130 @@ func joinColumns(left []string, leftW int, right []string, rightW int, height in
 		lines[i] = padLine(l, leftW) + padLine(r, rightW)
 	}
 	return lines
+}
+
+// runSample is a child program with known output, so every checklist item can
+// be judged even when the real tools never exercise it.
+func runSample() int {
+	in, out := os.Stdin, os.Stdout
+	state, err := term.MakeRaw(in.Fd())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer func() { _ = term.Restore(in.Fd(), state) }()
+	restoreVT, err := enableVirtualTerminal(out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer restoreVT()
+
+	_, _ = out.WriteString(sampleScreen())
+
+	keys := make(chan []byte)
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, err := in.Read(buf)
+			if err != nil {
+				close(keys)
+				return
+			}
+			keys <- slices.Clone(buf[:n])
+		}
+	}()
+
+	// Windows has no resize signal, so the size is polled instead.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	lastW, lastH := -1, -1
+	for {
+		select {
+		case k, ok := <-keys:
+			if !ok {
+				return 0
+			}
+			fmt.Fprintf(out, "tecla: %s\r\n", keyName(k))
+			switch string(k) {
+			case "q":
+				return 0
+			case "x":
+				return 3
+			}
+		case <-ticker.C:
+			w, h, err := term.GetSize(out.Fd())
+			if err == nil && (w != lastW || h != lastH) {
+				fmt.Fprintf(out, "tamanho: %dx%d\r\n", w, h)
+				lastW, lastH = w, h
+			}
+		}
+	}
+}
+
+func sampleScreen() string {
+	var b strings.Builder
+	b.WriteString("Amostra do protótipo (q sai com código 0, x sai com código 3)\r\n\r\n")
+
+	b.WriteString("16 cores:\r\n")
+	for _, base := range []int{40, 100} {
+		for i := range 8 {
+			fmt.Fprintf(&b, "\x1b[%dm   ", base+i)
+		}
+		b.WriteString("\x1b[m\r\n")
+	}
+
+	b.WriteString("256 cores:\r\n")
+	for i := range 256 {
+		fmt.Fprintf(&b, "\x1b[48;5;%dm ", i)
+		if i%32 == 31 {
+			b.WriteString("\x1b[m\r\n")
+		}
+	}
+
+	b.WriteString("truecolor:\r\n")
+	for i := range 64 {
+		r := i * 4
+		fmt.Fprintf(&b, "\x1b[48;2;%d;%d;%dm ", r, 255-r, 128)
+	}
+	b.WriteString("\x1b[m\r\n\r\n")
+
+	b.WriteString("┌─┐│└┘├┤\r\n")
+	b.WriteString("┌──────┐\r\n│ caixa│\r\n├──────┤\r\n└──────┘\r\n")
+	b.WriteString("á ç ã é ô\r\n\r\n")
+	return b.String()
+}
+
+var keyNames = map[string]string{
+	"\r":      "enter",
+	"\n":      "enter",
+	"\t":      "tab",
+	"\x1b":    "esc",
+	"\x7f":    "backspace",
+	"\b":      "backspace",
+	"\x1c":    "ctrl+\\",
+	"\x1b[A":  "seta para cima",
+	"\x1b[B":  "seta para baixo",
+	"\x1b[C":  "seta para a direita",
+	"\x1b[D":  "seta para a esquerda",
+	"\x1bOA":  "seta para cima",
+	"\x1bOB":  "seta para baixo",
+	"\x1bOC":  "seta para a direita",
+	"\x1bOD":  "seta para a esquerda",
+	"\x1b[H":  "home",
+	"\x1b[F":  "end",
+	"\x1b[3~": "delete",
+}
+
+func keyName(k []byte) string {
+	if name, ok := keyNames[string(k)]; ok {
+		return name
+	}
+	if len(k) == 1 && k[0] >= 1 && k[0] <= 26 {
+		return "ctrl+" + string(rune('a'+k[0]-1))
+	}
+	if utf8.Valid(k) && !strings.ContainsFunc(string(k), unicode.IsControl) {
+		return string(k)
+	}
+	return fmt.Sprintf("%q", k)
 }
