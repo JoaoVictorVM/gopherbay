@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -23,8 +25,13 @@ const (
 	minPaneW     = 20
 	minPaneH     = 5
 
+	// ConPTY may flush the last frame only after the process is gone, so the
+	// reader gets a short grace period before the emulator is closed.
+	drainTimeout = 500 * time.Millisecond
+
 	statusIdle    = "↑↓ mover · enter executar · q sair"
 	statusRunning = "ctrl+\\ encerrar ferramenta"
+	statusKilled  = "✗ encerrada pelo protótipo (Ctrl+\\)"
 )
 
 type entry struct {
@@ -48,17 +55,27 @@ type model struct {
 }
 
 type session struct {
-	entry  entry
-	pty    xpty.Pty
-	cmd    *exec.Cmd
-	emu    *vt.SafeEmulator
-	ctx    context.Context
-	cancel context.CancelFunc
-	screen chan struct{}
-	ended  chan struct{}
+	entry   entry
+	pty     xpty.Pty
+	cmd     *exec.Cmd
+	emu     *vt.SafeEmulator
+	ctx     context.Context
+	cancel  context.CancelFunc
+	screen  chan struct{}
+	ended   chan struct{}
+	exited  chan exitMsg
+	drained chan struct{}
+	killed  atomic.Bool
 }
 
 type screenMsg struct{ s *session }
+
+type exitMsg struct {
+	s            *session
+	code         int
+	killed       bool
+	waitReturned time.Time
+}
 
 type notFoundError struct{ name string }
 
@@ -95,17 +112,54 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if pane, ok := paneRect(m.width, m.height); ok && m.running {
+			m.sess.resize(pane.w, pane.h)
+		}
 	case tea.KeyPressMsg:
-		if m.running {
+		if !m.running {
+			return m, m.sidebarKey(msg)
+		}
+		if isReleaseKey(tea.Key(msg)) {
+			m.sess.kill()
 			return m, nil
 		}
-		return m, m.sidebarKey(msg)
+		m.sess.sendKey(msg)
+	case tea.PasteMsg:
+		if m.running {
+			m.sess.emu.Paste(msg.Content)
+		}
 	case screenMsg:
-		if msg.s == m.sess {
+		if msg.s == m.sess && m.running {
 			return m, waitScreen(msg.s)
+		}
+	case exitMsg:
+		if msg.s == m.sess {
+			m.running = false
+			m.status = exitStatus(msg)
 		}
 	}
 	return m, nil
+}
+
+func exitStatus(msg exitMsg) string {
+	switch {
+	case msg.killed:
+		return statusKilled
+	case msg.code == 0:
+		return "✓ terminou · código 0"
+	default:
+		return fmt.Sprintf("✗ terminou · código %d", msg.code)
+	}
+}
+
+// isReleaseKey accepts the shapes Ctrl+\ can take: Windows Terminal on an
+// ABNT2 keyboard may report the layout key in BaseCode, or only the raw
+// control character 0x1C.
+func isReleaseKey(k tea.Key) bool {
+	if k.Code == 0x1c {
+		return true
+	}
+	return k.Mod&tea.ModCtrl != 0 && (k.Code == '\\' || k.BaseCode == '\\')
 }
 
 func (m *model) sidebarKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -144,7 +198,7 @@ func (m *model) start() tea.Cmd {
 		return nil
 	}
 	m.sess, m.running, m.status = s, true, statusRunning
-	return waitScreen(s)
+	return tea.Batch(waitScreen(s), waitExit(s))
 }
 
 func startSession(e entry, cols, rows int) (*session, error) {
@@ -172,17 +226,20 @@ func startSession(e entry, cols, rows int) (*session, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &session{
-		entry:  e,
-		pty:    p,
-		cmd:    cmd,
-		emu:    vt.NewSafeEmulator(cols, rows),
-		ctx:    ctx,
-		cancel: cancel,
-		screen: make(chan struct{}, 1),
-		ended:  make(chan struct{}),
+		entry:   e,
+		pty:     p,
+		cmd:     cmd,
+		emu:     vt.NewSafeEmulator(cols, rows),
+		ctx:     ctx,
+		cancel:  cancel,
+		screen:  make(chan struct{}, 1),
+		ended:   make(chan struct{}),
+		exited:  make(chan exitMsg, 1),
+		drained: make(chan struct{}),
 	}
 	go s.readOutput()
 	go s.pumpInput()
+	go s.wait()
 	return s, nil
 }
 
@@ -200,6 +257,7 @@ func (s *session) readOutput() {
 			}
 		}
 		if err != nil {
+			close(s.drained)
 			return
 		}
 	}
@@ -219,6 +277,64 @@ func (s *session) pumpInput() {
 		if err != nil {
 			return
 		}
+	}
+}
+
+func (s *session) wait() {
+	err := xpty.WaitProcess(s.ctx, s.cmd)
+	returned := time.Now()
+
+	code := 0
+	var exitErr *exec.ExitError
+	switch {
+	case errors.As(err, &exitErr):
+		code = exitErr.ExitCode()
+	case err != nil:
+		code = -1
+	}
+
+	_ = s.pty.Close()
+	select {
+	case <-s.drained:
+	case <-time.After(drainTimeout):
+	}
+	_ = s.emu.Close()
+	close(s.ended)
+	s.exited <- exitMsg{s: s, code: code, killed: s.killed.Load(), waitReturned: returned}
+}
+
+func (s *session) kill() {
+	s.killed.Store(true)
+	s.cancel()
+	// WaitProcess only honors the context on Windows; elsewhere it is a plain
+	// cmd.Wait, so the process has to be killed directly.
+	if runtime.GOOS != "windows" {
+		_ = s.cmd.Process.Kill()
+	}
+}
+
+// resize follows the emulator first, so the redraw the tool sends after the
+// pseudoterminal changes size lands on a screen that already has the new
+// geometry.
+func (s *session) resize(cols, rows int) {
+	s.emu.Resize(cols, rows)
+	_ = s.pty.Resize(cols, rows)
+}
+
+func (s *session) sendKey(msg tea.KeyPressMsg) {
+	k := vt.KeyPressEvent(msg)
+	// The emulator matches keys by comparing whole structs, so fields it does
+	// not encode would make known keys fall through to plain text.
+	k.IsRepeat = false
+	if k.Mod&vt.ModCtrl != 0 {
+		k.Text = ""
+	}
+	s.emu.SendKey(k)
+}
+
+func waitExit(s *session) tea.Cmd {
+	return func() tea.Msg {
+		return <-s.exited
 	}
 }
 
