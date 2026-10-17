@@ -52,6 +52,16 @@ jobs:
         if: runner.os == 'Linux'
         run: make cover
 
+      # Fork pull requests have no access to the token and Codecov outages are not
+      # a code problem, so a failed upload must not turn the build red.
+      - name: Upload coverage
+        if: runner.os == 'Linux'
+        uses: codecov/codecov-action@v7
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
