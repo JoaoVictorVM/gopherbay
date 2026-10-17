@@ -625,3 +625,102 @@ func TestStore_NoFilesInWorkingDir(t *testing.T) {
 		t.Errorf("working folder has %d entries, want none", len(entries))
 	}
 }
+
+func TestStore_ExternalChangeAborts(t *testing.T) {
+	original := []byte("version: 1\ntools:\n  - name: Snake\n    command: snake\n")
+	tests := []struct {
+		name    string
+		missing bool
+		change  func(t *testing.T, path string)
+	}{
+		{"different size", false, func(t *testing.T, path string) {
+			writeFile(t, path, []byte("version: 1\ntools:\n  - name: Snake\n    command: snake --hard\n"))
+		}},
+		{"same size new mod time", false, func(t *testing.T, path string) {
+			writeFile(t, path, []byte("version: 1\ntools:\n  - name: Snaky\n    command: snake\n"))
+			future := time.Now().Add(time.Hour)
+			if err := os.Chtimes(path, future, future); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"same size same mod time", false, func(t *testing.T, path string) {
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, path, []byte("version: 1\ntools:\n  - name: Snaky\n    command: snake\n"))
+			if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"deleted", false, func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"created after a missing load", true, func(t *testing.T, path string) {
+			writeFile(t, path, []byte("version: 1\n"))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if !tt.missing {
+				writeFile(t, path, original)
+			}
+			store, log := newTestStore(t, path)
+			if err := store.Load(); err != nil {
+				t.Fatal(err)
+			}
+			tt.change(t, path)
+			external, readErr := os.ReadFile(path)
+
+			err := store.Save(sampleTools())
+
+			if !errors.Is(err, ErrChangedOnDisk) {
+				t.Fatalf("Save() error = %v, want ErrChangedOnDisk", err)
+			}
+			if want := "config.yaml mudou fora do gbay. Aperte r para recarregar (sua alteração não foi salva)"; err.Error() != want {
+				t.Errorf("Error() = %q, want %q", err.Error(), want)
+			}
+			after, afterErr := os.ReadFile(path)
+			if !bytes.Equal(after, external) || (afterErr == nil) != (readErr == nil) {
+				t.Errorf("file after = %q (%v), want the external content %q (%v)", after, afterErr, external, readErr)
+			}
+			if !strings.Contains(log.String(), "reason=changed_on_disk") {
+				t.Errorf("log = %q, want reason=changed_on_disk", log)
+			}
+		})
+	}
+}
+
+func TestStore_UnchangedFileSaves(t *testing.T) {
+	store, path, _ := loadedStore(t, []byte("version: 1\n"))
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Save(sampleTools()); err != nil {
+		t.Errorf("Save() error = %v, want nil for an untouched file", err)
+	}
+}
+
+func TestStore_ReloadAcceptsExternalChange(t *testing.T) {
+	store, path, _ := loadedStore(t, []byte("version: 1\n"))
+	writeFile(t, path, []byte("version: 1\ntools:\n  - name: a\n    command: b\n"))
+	if err := store.Save(sampleTools()); !errors.Is(err, ErrChangedOnDisk) {
+		t.Fatalf("Save() error = %v, want ErrChangedOnDisk", err)
+	}
+
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Save(sampleTools()); err != nil {
+		t.Errorf("Save() after reload error = %v", err)
+	}
+}

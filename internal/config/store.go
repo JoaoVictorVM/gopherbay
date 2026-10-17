@@ -111,7 +111,7 @@ func (s *Store) Load() error {
 
 // Save validates tools and atomically replaces the file with them, keeping the
 // loaded release key. On any error the file and the in-memory config stay as
-// they were: ErrReadOnly, *ValidationError or *SaveError.
+// they were: ErrReadOnly, *ValidationError, ErrChangedOnDisk or *SaveError.
 func (s *Store) Save(tools []Tool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,6 +125,14 @@ func (s *Store) Save(tools []Tool) error {
 	if violations := ValidateTools(tools); len(violations) > 0 {
 		s.logger.Warn("config save aborted", "path", s.path, "reason", "invalid")
 		return &ValidationError{Violations: violations}
+	}
+	changed, err := s.changedOnDisk()
+	if err != nil {
+		return s.saveFailed(&SaveError{Op: "verificar arquivo", Err: err})
+	}
+	if changed {
+		s.logger.Warn("config save aborted", "path", s.path, "reason", "changed_on_disk")
+		return ErrChangedOnDisk
 	}
 
 	cfg := Config{Version: CurrentVersion, Keys: s.cfg.Keys, Tools: tools}
@@ -143,6 +151,27 @@ func (s *Store) Save(tools []Tool) error {
 	s.cfg, s.stamp = cfg.Clone(), st
 	s.logger.Info("config saved", "path", s.path, "tools", len(tools), "duration", time.Since(start))
 	return nil
+}
+
+// changedOnDisk compares the file with the load stamp. Modification time and
+// size are cheap but coarse, so a match is confirmed with the content hash to
+// catch a same size edit within the filesystem timestamp granularity.
+func (s *Store) changedOnDisk() (bool, error) {
+	fi, err := os.Stat(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return s.stamp.exists, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !s.stamp.exists || fi.Size() != s.stamp.size || !fi.ModTime().Equal(s.stamp.modTime) {
+		return true, nil
+	}
+	data, err := os.ReadFile(filepath.Clean(s.path))
+	if err != nil {
+		return false, err
+	}
+	return sha256.Sum256(data) != s.stamp.sum, nil
 }
 
 func (s *Store) saveFailed(err error) error {
