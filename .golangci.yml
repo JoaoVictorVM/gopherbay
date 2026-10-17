@@ -1,0 +1,50 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+    - sloglint
+    - unconvert
+    - unparam
+    - usestdlibvars
+  settings:
+    misspell:
+      locale: US
+      # misspell only knows English and flags the pt-BR messages shown to the user.
+      ignore-rules:
+        - argumentos
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    sloglint:
+      kv-only: true
+      static-msg: true
+      key-naming-case: snake
+  exclusions:
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Tests build and run the binary with arguments they define themselves.
+      - path: _test\.go
+        linters:
+          - gosec
+        text: G204
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/JoaoVictorVM/gopherbay
