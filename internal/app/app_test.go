@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -181,4 +182,182 @@ func TestRun_NoStrayOutput(t *testing.T) {
 
 func quoteLogValue(s string) string {
 	return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"`
+}
+
+const twoTools = "version: 1\ntools:\n  - name: Relógio\n    command: clock-tty\n  - name: Snake\n    command: snake\n"
+
+func writeConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRun_LoadsConfigBeforeFirstFrame(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, filepath.Join(dir, "config.yaml"), twoTools)
+
+	res := runApp(context.Background(), t, Options{ConfigDir: dir, Debug: true}, "q")
+
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	loaded := strings.Index(res.log, `msg="config loaded"`)
+	frame := strings.Index(res.log, `msg="first frame"`)
+	if loaded < 0 || frame < 0 || loaded > frame {
+		t.Errorf("log = %q, want config loaded before first frame", res.log)
+	}
+}
+
+func TestRun_ConfigOverrideLoadsThatFile(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(t.TempDir(), "demo.yaml")
+	writeConfig(t, other, twoTools)
+
+	res := runApp(context.Background(), t, Options{ConfigDir: dir, ConfigPath: other}, "q")
+
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	if !strings.Contains(res.log, `msg="config loaded"`) || !strings.Contains(res.log, "tools=2") {
+		t.Errorf("log = %q, want config loaded with tools=2", res.log)
+	}
+	if !strings.Contains(res.log, "path="+other) && !strings.Contains(res.log, "path="+quoteLogValue(other)) {
+		t.Errorf("log = %q, want path=%s", res.log, other)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("config.yaml created in the config dir: %v", err)
+	}
+}
+
+func TestRun_MissingConfigCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+
+	res := runApp(context.Background(), t, Options{ConfigDir: dir}, "q")
+
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("config.yaml exists after a run without one: %v", err)
+	}
+	if !strings.Contains(res.log, "missing=true") {
+		t.Errorf("log = %q, want missing=true", res.log)
+	}
+}
+
+// runSteps runs gbay while drive sends keys and waits for log entries, so a
+// test can change files between keys. It quits with q after drive returns.
+func runSteps(t *testing.T, opts Options, drive func(send func(string), waitLog func(entry string, count int))) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	var out, stderr bytes.Buffer
+	opts.Input, opts.Output, opts.Stderr = pr, &out, &stderr
+
+	logPath := filepath.Join(opts.ConfigDir, logging.FileName)
+	readLog := func() string {
+		data, _ := os.ReadFile(logPath)
+		return string(data)
+	}
+	waitLog := func(entry string, count int) {
+		for strings.Count(readLog(), entry) < count {
+			if ctx.Err() != nil {
+				t.Errorf("log never had %d %q entries: %q", count, entry, readLog())
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	send := func(keys string) {
+		if _, err := pw.Write([]byte(keys)); err != nil {
+			t.Errorf("send %q: %v", keys, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, opts) }()
+	drive(send, waitLog)
+	send("q")
+
+	if err := <-done; err != nil {
+		t.Errorf("Run() error = %v", err)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatal("Run() did not return before the deadline")
+	}
+	return readLog()
+}
+
+const brokenConfig = "version: 1\ntools:\n  - name: a\n   command: b\n"
+
+func TestRun_InvalidConfigOpensReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, brokenConfig)
+
+	log := runSteps(t, Options{ConfigDir: dir}, func(send func(string), waitLog func(string, int)) {
+		waitLog(`msg="config load failed"`, 1)
+		send("a")
+		send("e")
+	})
+
+	if !strings.Contains(log, "kind=syntax line=4") {
+		t.Errorf("log = %q, want the syntax error on line 4", log)
+	}
+	if strings.Contains(log, `msg="config saved"`) {
+		t.Errorf("log = %q, want no save", log)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != brokenConfig {
+		t.Errorf("config bytes = %q, %v, want unchanged", data, err)
+	}
+}
+
+func TestRun_ReloadWithR(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, brokenConfig)
+
+	log := runSteps(t, Options{ConfigDir: dir}, func(send func(string), waitLog func(string, int)) {
+		waitLog(`msg="config load failed"`, 1)
+		writeConfig(t, path, twoTools)
+		send("r")
+		waitLog(`msg="config loaded"`, 1)
+	})
+
+	failed := strings.Index(log, `msg="config load failed"`)
+	loaded := strings.Index(log, `msg="config loaded"`)
+	if failed < 0 || loaded < failed {
+		t.Errorf("log = %q, want a failed load followed by a successful one", log)
+	}
+	if !strings.Contains(log, "tools=2 missing=false reload=true") {
+		t.Errorf("log = %q, want the reload with 2 tools", log)
+	}
+}
+
+func TestRun_NoFilesInWorkingDir(t *testing.T) {
+	wd := t.TempDir()
+	t.Chdir(wd)
+	dir := t.TempDir()
+
+	runSteps(t, Options{ConfigDir: dir}, func(send func(string), waitLog func(string, int)) {
+		waitLog(`msg="config loaded"`, 1)
+		send("r")
+		waitLog(`msg="config loaded"`, 2)
+	})
+
+	entries, err := os.ReadDir(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("working folder has %d entries, want none", len(entries))
+	}
 }

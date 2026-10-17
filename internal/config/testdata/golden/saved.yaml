@@ -1,0 +1,23 @@
+version: 1
+keys:
+  release: 'ctrl+\'
+tools:
+  - name: Relógio
+    command: clock-tty --24h
+    description: Relógio no terminal
+    dir:
+      mode: current
+  - name: Controle de curso
+    command: curso
+    dir:
+      mode: fixed
+      path: 'D:\projetos\curso'
+  - name: 'Uso: barra'
+    command: '"C:\Program Files\usage\usage.exe" --bar'
+    description: 'Mostra o uso # não é comentário, d''água'
+    dir:
+      mode: ask
+  - name: 'yes'
+    command: git log --format='%h "%s"'
+    dir:
+      mode: current

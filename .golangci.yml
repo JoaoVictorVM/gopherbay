@@ -39,6 +39,12 @@ linters:
         linters:
           - gosec
         text: G204
+      # Every path here derives from the config file the user chose with --config
+      # or the default location, which gbay must read and replace by design.
+      - path: internal/config/(atomic|store)\.go
+        linters:
+          - gosec
+        text: G703
 
 formatters:
   enable:
