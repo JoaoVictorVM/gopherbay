@@ -7,10 +7,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,20 +57,67 @@ type model struct {
 	status   string
 	sess     *session
 	running  bool
+	log      *slog.Logger
+	// pendingEnd holds the exit until the first frame with the sidebar
+	// focused, which is where exit detection is measured.
+	pendingEnd *exitMsg
+	killMs     int64
 }
 
 type session struct {
-	entry   entry
-	pty     xpty.Pty
-	cmd     *exec.Cmd
-	emu     *vt.SafeEmulator
-	ctx     context.Context
-	cancel  context.CancelFunc
-	screen  chan struct{}
-	ended   chan struct{}
-	exited  chan exitMsg
-	drained chan struct{}
-	killed  atomic.Bool
+	entry     entry
+	pty       xpty.Pty
+	cmd       *exec.Cmd
+	emu       *vt.SafeEmulator
+	ctx       context.Context
+	cancel    context.CancelFunc
+	screen    chan struct{}
+	ended     chan struct{}
+	exited    chan exitMsg
+	drained   chan struct{}
+	killed    atomic.Bool
+	started   time.Time
+	releaseAt time.Time
+	echo      echoMeter
+}
+
+// echoMeter approximates key echo as the time from forwarding a printable key
+// to the next chunk of output, since the painted frame is not observable.
+type echoMeter struct {
+	mu      sync.Mutex
+	pending []time.Time
+	samples []time.Duration
+}
+
+func (e *echoMeter) keySent(t time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pending = append(e.pending, t)
+}
+
+func (e *echoMeter) output(t time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, p := range e.pending {
+		e.samples = append(e.samples, t.Sub(p))
+	}
+	e.pending = e.pending[:0]
+}
+
+func (e *echoMeter) stats() (p50, p95 time.Duration, n int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return percentile(e.samples, 0.50), percentile(e.samples, 0.95), len(e.samples)
+}
+
+func percentile(samples []time.Duration, p float64) time.Duration {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := slices.Clone(samples)
+	slices.Sort(sorted)
+	i := int(math.Ceil(p*float64(len(sorted)))) - 1
+	return sorted[max(i, 0)]
 }
 
 type screenMsg struct{ s *session }
@@ -89,19 +141,34 @@ func main() {
 	uso := flag.String("uso", "usage-bar", "linha de comando da barra de uso")
 	flag.Parse()
 
+	os.Exit(run([]entry{
+		{key: "relogio", label: "Relógio", command: *relogio},
+		{key: "jogo", label: "Jogo", command: *jogo},
+		{key: "uso", label: "Barra de uso", command: *uso},
+	}))
+}
+
+func run(entries []entry) int {
+	// The log lives outside the repository and the current folder on purpose;
+	// it is truncated on every start so each run is measured on its own.
+	logFile, err := os.Create(filepath.Join(os.TempDir(), "gbay-prototipo.log"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer logFile.Close()
+
 	m := &model{
-		entries: []entry{
-			{key: "relogio", label: "Relógio", command: *relogio},
-			{key: "jogo", label: "Jogo", command: *jogo},
-			{key: "uso", label: "Barra de uso", command: *uso},
-		},
-		status: statusIdle,
+		entries: entries,
+		status:  statusIdle,
+		log:     slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 
 	if _, err := tea.NewProgram(m, tea.WithFPS(60)).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func (m *model) Init() tea.Cmd {
@@ -114,12 +181,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		if pane, ok := paneRect(m.width, m.height); ok && m.running {
 			m.sess.resize(pane.w, pane.h)
+			m.log.Debug("session resized", "cols", pane.w, "rows", pane.h)
 		}
 	case tea.KeyPressMsg:
 		if !m.running {
 			return m, m.sidebarKey(msg)
 		}
 		if isReleaseKey(tea.Key(msg)) {
+			m.log.Info("release key pressed")
+			m.sess.releaseAt = time.Now()
 			m.sess.kill()
 			return m, nil
 		}
@@ -136,6 +206,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.s == m.sess {
 			m.running = false
 			m.status = exitStatus(msg)
+			m.pendingEnd = &msg
+			if msg.killed {
+				m.killMs = time.Since(msg.s.releaseAt).Milliseconds()
+			}
 		}
 	}
 	return m, nil
@@ -178,6 +252,10 @@ func (m *model) sidebarKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.selected++
 			m.status = statusIdle
 		}
+	default:
+		// Only the key shape is recorded, never its text, to find out how the
+		// terminal reports combinations such as Ctrl+\.
+		m.log.Debug("unhandled key", "code", msg.Code, "mod", msg.Mod)
 	}
 	return nil
 }
@@ -187,8 +265,10 @@ func (m *model) start() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	s, err := startSession(m.entries[m.selected], pane.w, pane.h)
+	e := m.entries[m.selected]
+	s, err := startSession(e, pane.w, pane.h)
 	if err != nil {
+		m.log.Error("start failed", "entry", e.key, "command", e.command, "error", err)
 		var nf *notFoundError
 		if errors.As(err, &nf) {
 			m.status = nf.Error()
@@ -197,6 +277,7 @@ func (m *model) start() tea.Cmd {
 		}
 		return nil
 	}
+	m.log.Info("session started", "entry", e.key, "command", e.command, "cols", pane.w, "rows", pane.h)
 	m.sess, m.running, m.status = s, true, statusRunning
 	return tea.Batch(waitScreen(s), waitExit(s))
 }
@@ -236,6 +317,7 @@ func startSession(e entry, cols, rows int) (*session, error) {
 		ended:   make(chan struct{}),
 		exited:  make(chan exitMsg, 1),
 		drained: make(chan struct{}),
+		started: time.Now(),
 	}
 	go s.readOutput()
 	go s.pumpInput()
@@ -248,6 +330,7 @@ func (s *session) readOutput() {
 	for {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
+			s.echo.output(time.Now())
 			_, _ = s.emu.Write(buf[:n])
 			// A pending signal already covers this write, so bursts collapse
 			// into a single redraw.
@@ -329,6 +412,9 @@ func (s *session) sendKey(msg tea.KeyPressMsg) {
 	if k.Mod&vt.ModCtrl != 0 {
 		k.Text = ""
 	}
+	if k.Text != "" {
+		s.echo.keySent(time.Now())
+	}
 	s.emu.SendKey(k)
 }
 
@@ -350,6 +436,11 @@ func waitScreen(s *session) tea.Cmd {
 }
 
 func (m *model) View() tea.View {
+	if m.pendingEnd != nil {
+		m.logEnd(*m.pendingEnd)
+		m.pendingEnd = nil
+	}
+
 	v := tea.NewView("")
 	v.AltScreen = true
 
@@ -370,6 +461,22 @@ func (m *model) View() tea.View {
 		}
 	}
 	return v
+}
+
+func (m *model) logEnd(msg exitMsg) {
+	p50, p95, n := msg.s.echo.stats()
+	attrs := []any{
+		"entry", msg.s.entry.key,
+		"exit_code", msg.code,
+		"killed", msg.killed,
+		"duration", msg.waitReturned.Sub(msg.s.started),
+		"exit_detect_ms", time.Since(msg.waitReturned).Milliseconds(),
+	}
+	if msg.killed {
+		attrs = append(attrs, "kill_ms", m.killMs)
+	}
+	attrs = append(attrs, "echo_p50_ms", p50.Milliseconds(), "echo_p95_ms", p95.Milliseconds(), "echo_samples", n)
+	m.log.Info("session ended", attrs...)
 }
 
 func (m *model) sidebarLines(height int) []string {
