@@ -3,13 +3,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
+	"github.com/charmbracelet/x/xpty"
 )
 
 const (
@@ -17,7 +23,8 @@ const (
 	minPaneW     = 20
 	minPaneH     = 5
 
-	statusIdle = "↑↓ mover · enter executar · q sair"
+	statusIdle    = "↑↓ mover · enter executar · q sair"
+	statusRunning = "ctrl+\\ encerrar ferramenta"
 )
 
 type entry struct {
@@ -36,6 +43,27 @@ type model struct {
 	width    int
 	height   int
 	status   string
+	sess     *session
+	running  bool
+}
+
+type session struct {
+	entry  entry
+	pty    xpty.Pty
+	cmd    *exec.Cmd
+	emu    *vt.SafeEmulator
+	ctx    context.Context
+	cancel context.CancelFunc
+	screen chan struct{}
+	ended  chan struct{}
+}
+
+type screenMsg struct{ s *session }
+
+type notFoundError struct{ name string }
+
+func (e *notFoundError) Error() string {
+	return "Comando não encontrado: " + e.name + " (verifique se está no PATH)"
 }
 
 func main() {
@@ -68,7 +96,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyPressMsg:
+		if m.running {
+			return m, nil
+		}
 		return m, m.sidebarKey(msg)
+	case screenMsg:
+		if msg.s == m.sess {
+			return m, waitScreen(msg.s)
+		}
 	}
 	return m, nil
 }
@@ -77,6 +112,8 @@ func (m *model) sidebarKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return tea.Quit
+	case "enter":
+		return m.start()
 	case "up", "k":
 		if m.selected > 0 {
 			m.selected--
@@ -89,6 +126,111 @@ func (m *model) sidebarKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *model) start() tea.Cmd {
+	pane, ok := paneRect(m.width, m.height)
+	if !ok {
+		return nil
+	}
+	s, err := startSession(m.entries[m.selected], pane.w, pane.h)
+	if err != nil {
+		var nf *notFoundError
+		if errors.As(err, &nf) {
+			m.status = nf.Error()
+		} else {
+			m.status = "Não foi possível iniciar o terminal embutido: " + err.Error()
+		}
+		return nil
+	}
+	m.sess, m.running, m.status = s, true, statusRunning
+	return waitScreen(s)
+}
+
+func startSession(e entry, cols, rows int) (*session, error) {
+	fields := strings.Fields(e.command)
+	if len(fields) == 0 {
+		return nil, &notFoundError{name: e.command}
+	}
+	path, err := exec.LookPath(fields[0])
+	if err != nil {
+		return nil, &notFoundError{name: fields[0]}
+	}
+
+	p, err := xpty.NewPty(cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(path, fields[1:]...)
+	if runtime.GOOS != "windows" {
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	}
+	if err := p.Start(cmd); err != nil {
+		_ = p.Close()
+		return nil, err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &session{
+		entry:  e,
+		pty:    p,
+		cmd:    cmd,
+		emu:    vt.NewSafeEmulator(cols, rows),
+		ctx:    ctx,
+		cancel: cancel,
+		screen: make(chan struct{}, 1),
+		ended:  make(chan struct{}),
+	}
+	go s.readOutput()
+	go s.pumpInput()
+	return s, nil
+}
+
+func (s *session) readOutput() {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := s.pty.Read(buf)
+		if n > 0 {
+			_, _ = s.emu.Write(buf[:n])
+			// A pending signal already covers this write, so bursts collapse
+			// into a single redraw.
+			select {
+			case s.screen <- struct{}{}:
+			default:
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// pumpInput carries encoded keys and the emulator's replies to terminal
+// queries. It must keep draining even after the pseudoterminal is gone,
+// because the emulator writes those replies into an unbuffered pipe and would
+// block the output reader otherwise.
+func (s *session) pumpInput() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := s.emu.Read(buf)
+		if n > 0 {
+			_, _ = s.pty.Write(buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func waitScreen(s *session) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case <-s.screen:
+			return screenMsg{s: s}
+		case <-s.ended:
+			return nil
+		}
+	}
 }
 
 func (m *model) View() tea.View {
@@ -104,6 +246,13 @@ func (m *model) View() tea.View {
 	lines := joinColumns(m.sidebarLines(pane.h), sidebarWidth, m.paneLines(), pane.w, pane.h)
 	lines = append(lines, padLine(m.status, m.width))
 	v.SetContent(strings.Join(lines, "\n"))
+
+	if m.running && !m.sess.emu.CursorHidden() {
+		pos := m.sess.emu.CursorPosition()
+		if pos.X < pane.w && pos.Y < pane.h {
+			v.Cursor = tea.NewCursor(pane.x+pos.X, pane.y+pos.Y)
+		}
+	}
 	return v
 }
 
@@ -132,7 +281,10 @@ func (m *model) sidebarLines(height int) []string {
 }
 
 func (m *model) paneLines() []string {
-	return nil
+	if m.sess == nil {
+		return nil
+	}
+	return strings.Split(m.sess.emu.Render(), "\n")
 }
 
 // paneRect reserves the last row for the status line, so the pane spans every
