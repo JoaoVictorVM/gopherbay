@@ -22,7 +22,7 @@ type runResult struct {
 
 // The pipe stays open until Run returns so the program only ends through the
 // keys sent, and the deadline turns a hang into a failure.
-func runApp(t *testing.T, ctx context.Context, opts Options, keys string) runResult {
+func runApp(ctx context.Context, t *testing.T, opts Options, keys string) runResult {
 	t.Helper()
 	if opts.ConfigDir == "" {
 		opts.ConfigDir = t.TempDir()
@@ -53,7 +53,7 @@ func runApp(t *testing.T, ctx context.Context, opts Options, keys string) runRes
 }
 
 func TestRun_QuitsOnQ(t *testing.T) {
-	res := runApp(t, context.Background(), Options{}, "q")
+	res := runApp(context.Background(), t, Options{}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v", res.err)
@@ -71,7 +71,7 @@ func TestRun_RotatesLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := runApp(t, context.Background(), Options{ConfigDir: dir}, "q")
+	res := runApp(context.Background(), t, Options{ConfigDir: dir}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v", res.err)
@@ -89,7 +89,7 @@ func TestRun_RotatesLog(t *testing.T) {
 }
 
 func TestRun_DebugFlag(t *testing.T) {
-	res := runApp(t, context.Background(), Options{Debug: true}, "q")
+	res := runApp(context.Background(), t, Options{Debug: true}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v", res.err)
@@ -103,7 +103,7 @@ func TestRun_DebugFlag(t *testing.T) {
 }
 
 func TestRun_InfoByDefault(t *testing.T) {
-	res := runApp(t, context.Background(), Options{}, "q")
+	res := runApp(context.Background(), t, Options{}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v", res.err)
@@ -121,7 +121,7 @@ func TestRun_ConfigOverrideLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := runApp(t, context.Background(), Options{ConfigPath: "demo.yaml"}, "q")
+	res := runApp(context.Background(), t, Options{ConfigPath: "demo.yaml"}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v", res.err)
@@ -138,7 +138,7 @@ func TestRun_LogOpenFailureContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := runApp(t, context.Background(), Options{ConfigDir: dir}, "q")
+	res := runApp(context.Background(), t, Options{ConfigDir: dir}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v, want nil", res.err)
@@ -153,7 +153,7 @@ func TestRun_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res := runApp(t, ctx, Options{}, "")
+	res := runApp(ctx, t, Options{}, "")
 
 	if res.err != nil {
 		t.Errorf("Run() error = %v, want nil", res.err)
@@ -161,7 +161,7 @@ func TestRun_ContextCancelled(t *testing.T) {
 }
 
 func TestRun_NoStrayOutput(t *testing.T) {
-	res := runApp(t, context.Background(), Options{Debug: true}, "q")
+	res := runApp(context.Background(), t, Options{Debug: true}, "q")
 
 	if res.err != nil {
 		t.Fatalf("Run() error = %v", res.err)

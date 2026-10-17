@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 )
 
+// Log file names inside the config directory.
 const (
 	FileName    = "gbay.log"
 	OldFileName = "gbay.log.old"
@@ -36,7 +37,7 @@ func Open(dir string, level slog.Level) (*File, error) {
 	path := filepath.Join(dir, FileName)
 	rotateErr := rotate(path, filepath.Join(dir, OldFileName))
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // path is built from the config dir, not from user input
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("abrir arquivo de log: %w", err)
 	}

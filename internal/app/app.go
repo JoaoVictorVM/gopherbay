@@ -31,7 +31,7 @@ type Options struct {
 }
 
 // Run opens the log, runs the interface until the user quits or ctx is
-// cancelled, and returns an error only when the interface fails.
+// canceled, and returns an error only when the interface fails.
 func Run(ctx context.Context, opts Options) error {
 	if opts.Start.IsZero() {
 		opts.Start = time.Now()
