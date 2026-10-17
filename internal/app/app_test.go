@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -181,4 +182,69 @@ func TestRun_NoStrayOutput(t *testing.T) {
 
 func quoteLogValue(s string) string {
 	return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"`
+}
+
+const twoTools = "version: 1\ntools:\n  - name: Relógio\n    command: clock-tty\n  - name: Snake\n    command: snake\n"
+
+func writeConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRun_LoadsConfigBeforeFirstFrame(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, filepath.Join(dir, "config.yaml"), twoTools)
+
+	res := runApp(context.Background(), t, Options{ConfigDir: dir, Debug: true}, "q")
+
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	loaded := strings.Index(res.log, `msg="config loaded"`)
+	frame := strings.Index(res.log, `msg="first frame"`)
+	if loaded < 0 || frame < 0 || loaded > frame {
+		t.Errorf("log = %q, want config loaded before first frame", res.log)
+	}
+}
+
+func TestRun_ConfigOverrideLoadsThatFile(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(t.TempDir(), "demo.yaml")
+	writeConfig(t, other, twoTools)
+
+	res := runApp(context.Background(), t, Options{ConfigDir: dir, ConfigPath: other}, "q")
+
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	if !strings.Contains(res.log, `msg="config loaded"`) || !strings.Contains(res.log, "tools=2") {
+		t.Errorf("log = %q, want config loaded with tools=2", res.log)
+	}
+	if !strings.Contains(res.log, "path="+other) && !strings.Contains(res.log, "path="+quoteLogValue(other)) {
+		t.Errorf("log = %q, want path=%s", res.log, other)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("config.yaml created in the config dir: %v", err)
+	}
+}
+
+func TestRun_MissingConfigCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+
+	res := runApp(context.Background(), t, Options{ConfigDir: dir}, "q")
+
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("config.yaml exists after a run without one: %v", err)
+	}
+	if !strings.Contains(res.log, "missing=true") {
+		t.Errorf("log = %q, want missing=true", res.log)
+	}
 }

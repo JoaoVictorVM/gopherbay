@@ -8,13 +8,60 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/JoaoVictorVM/gopherbay/internal/config"
 )
 
-func newTestModel(t *testing.T) (*model, *bytes.Buffer) {
+// fakeStore returns the next queued result on each Load, so a test can make
+// a reload succeed or fail.
+type fakeStore struct {
+	path    string
+	cfg     config.Config
+	err     *config.Error
+	results []fakeLoad
+	loads   int
+}
+
+type fakeLoad struct {
+	cfg config.Config
+	err *config.Error
+}
+
+func (f *fakeStore) Load() error {
+	f.loads++
+	if len(f.results) > 0 {
+		f.cfg, f.err = f.results[0].cfg, f.results[0].err
+		f.results = f.results[1:]
+	}
+	if f.err != nil {
+		f.cfg = config.Empty()
+		return f.err
+	}
+	return nil
+}
+
+func (f *fakeStore) Config() config.Config    { return f.cfg.Clone() }
+func (f *fakeStore) LoadError() *config.Error { return f.err }
+func (f *fakeStore) Path() string             { return f.path }
+
+func configWith(names ...string) config.Config {
+	cfg := config.Empty()
+	for _, name := range names {
+		cfg.Tools = append(cfg.Tools, config.Tool{Name: name, Command: "x", Dir: config.Dir{Mode: config.ModeCurrent}})
+	}
+	return cfg
+}
+
+func newTestModelWith(t *testing.T, store *fakeStore) (*model, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return newModel(logger, time.Now()), &buf
+	return newModel(logger, time.Now(), store), &buf
+}
+
+func newTestModel(t *testing.T) (*model, *bytes.Buffer) {
+	t.Helper()
+	return newTestModelWith(t, &fakeStore{path: "config.yaml", cfg: config.Empty()})
 }
 
 func assertQuits(t *testing.T, cmd tea.Cmd) {
@@ -66,7 +113,7 @@ func TestModel_ViewPlaceholder(t *testing.T) {
 
 	v := m.View()
 
-	for _, want := range []string{"gopherbay", "Aperte q para sair."} {
+	for _, want := range []string{"gopherbay", "Nenhuma ferramenta cadastrada.", "Aperte q para sair."} {
 		if !strings.Contains(v.Content, want) {
 			t.Errorf("View().Content = %q, want it to contain %q", v.Content, want)
 		}
@@ -102,5 +149,16 @@ func TestModel_WindowSizeLogged(t *testing.T) {
 	want := `level=DEBUG msg="window resized" cols=120 rows=30`
 	if !strings.Contains(buf.String(), want) {
 		t.Errorf("log = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestModel_ListsToolsInOrder(t *testing.T) {
+	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("Relógio", "Snake", "Curso")})
+
+	content := m.View().Content
+
+	want := "gopherbay\n\nRelógio\nSnake\nCurso\n\nAperte q para sair."
+	if content != want {
+		t.Errorf("View().Content = %q, want %q", content, want)
 	}
 }

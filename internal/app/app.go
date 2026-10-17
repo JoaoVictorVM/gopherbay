@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/JoaoVictorVM/gopherbay/internal/config"
 	"github.com/JoaoVictorVM/gopherbay/internal/logging"
 	"github.com/JoaoVictorVM/gopherbay/internal/version"
 )
@@ -72,7 +73,12 @@ func Run(ctx context.Context, opts Options) error {
 		"debug", opts.Debug,
 	)
 
-	err = runProgram(ctx, logger, opts)
+	// Loading before the program starts lets the first frame show the config.
+	// A failed load is not fatal: the interface opens in read-only mode with the error.
+	store := config.NewStore(configPath, logger)
+	_ = store.Load()
+
+	err = runProgram(ctx, logger, opts, store)
 
 	attrs := []any{"duration", time.Since(opts.Start)}
 	if err != nil {
@@ -101,7 +107,7 @@ func openLogger(dir string, opts Options) (logger *slog.Logger, closeLog func())
 	return f.Logger, func() { _ = f.Close() }
 }
 
-func runProgram(ctx context.Context, logger *slog.Logger, opts Options) error {
+func runProgram(ctx context.Context, logger *slog.Logger, opts Options, store configStore) error {
 	// SIGINT and SIGTERM arrive through ctx, so Bubble Tea must not turn them into errors.
 	progOpts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithoutSignalHandler()}
 	// tea.WithInput(nil) disables input entirely, so only override real readers.
@@ -112,7 +118,7 @@ func runProgram(ctx context.Context, logger *slog.Logger, opts Options) error {
 		progOpts = append(progOpts, tea.WithOutput(opts.Output))
 	}
 
-	_, err := tea.NewProgram(newModel(logger, opts.Start), progOpts...).Run()
+	_, err := tea.NewProgram(newModel(logger, opts.Start, store), progOpts...).Run()
 	if err != nil && errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil
 	}
