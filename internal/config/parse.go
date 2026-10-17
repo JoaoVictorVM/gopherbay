@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
@@ -35,11 +36,13 @@ type rawKeys struct {
 // configParser holds the format version and the migrations, so tests can
 // exercise the migration hook with versions that do not exist yet.
 type configParser struct {
-	current int
+	current    int
+	migrations map[int]migrateFunc
+	logger     *slog.Logger
 }
 
 func defaultParser() configParser {
-	return configParser{current: CurrentVersion}
+	return newParser(slog.New(slog.DiscardHandler))
 }
 
 // Parse turns the bytes of a config file into a Config. Any problem is
@@ -80,8 +83,14 @@ func (p configParser) parse(data []byte, path string) (Config, error) {
 
 	// The version is checked before the strict decode so a file written by a
 	// newer gbay reports its version instead of an unknown field it added.
-	if _, err := p.checkVersion(body, path); err != nil {
+	version, err := p.checkVersion(body, path)
+	if err != nil {
 		return Config{}, err
+	}
+	if version < p.current {
+		if err := p.migrate(body, version, lineOf(field(body, "version")), path); err != nil {
+			return Config{}, err
+		}
 	}
 
 	var raw rawConfig
@@ -112,7 +121,7 @@ func (p configParser) checkVersion(body ast.Node, path string) (int, error) {
 	switch {
 	case v > p.current:
 		return 0, validationError(path, lineOf(node), RuleVersionUnsupported, fmt.Sprintf("Versão %d do config não é suportada por esta versão do gbay", v))
-	case v < p.current:
+	case v < 0:
 		return 0, validationError(path, lineOf(node), RuleVersionTooOld, fmt.Sprintf("Versão %d do config é inválida (use version: %d)", v, p.current))
 	}
 	return v, nil
