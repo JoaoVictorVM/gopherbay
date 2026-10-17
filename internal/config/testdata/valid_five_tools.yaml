@@ -1,0 +1,23 @@
+version: 1
+keys:
+  release: "ctrl+\\"
+tools:
+  - name: Relógio
+    command: clock-tty --24h
+    description: Relógio no terminal
+    dir:
+      mode: current
+  - name: Snake
+    command: snake
+  - name: Controle de curso
+    command: curso
+    dir:
+      mode: fixed
+      path: D:\projetos\curso
+  - name: Uso
+    command: '"C:\Program Files\usage\usage.exe" --bar'
+    description: Barra de uso
+    dir:
+      mode: ask
+  - name: Git log
+    command: git log --format='%h "%s"'

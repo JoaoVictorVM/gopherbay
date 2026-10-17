@@ -1,0 +1,9 @@
+version: 1
+tools:
+  - name: Snake
+    command: snake
+  - name: Relógio
+    command: clock-tty
+  - description: segundo snake
+    name: snake
+    command: snake2

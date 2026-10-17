@@ -2,7 +2,10 @@ module github.com/JoaoVictorVM/gopherbay
 
 go 1.27.2
 
-require charm.land/bubbletea/v2 v2.1.0
+require (
+	charm.land/bubbletea/v2 v2.1.0
+	github.com/goccy/go-yaml v1.19.2
+)
 
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect

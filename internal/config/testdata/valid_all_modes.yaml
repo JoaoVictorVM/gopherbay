@@ -1,0 +1,20 @@
+# Um comentário no topo.
+version: 1
+keys:
+  release: ctrl+]
+tools:
+  - name: Atual
+    command: atual
+    dir:
+      mode: current
+  - name: Fixa
+    command: fixa --x
+    description: Pasta fixa com acentuação
+    dir:
+      mode: fixed
+      path: /home/joão/projetos
+  - name: Perguntar
+    command: perguntar
+    dir:
+      mode: ask
+      path: D:\ultimo

@@ -1,0 +1,12 @@
+version: 1
+tools:
+  - name: Relógio
+    command: clock-tty --24h
+  - name: Snake
+    command: snake
+  - name: Uso
+    command: usage
+  - name: Curso
+    command: curso
+  - name: Quebrado
+   command: quebrado
