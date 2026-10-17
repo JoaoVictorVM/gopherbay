@@ -193,6 +193,8 @@ func TestParse_ValidationRules(t *testing.T) {
 		{"duplicate key", head + "  - name: a\n    name: b\n    command: x\n", RuleDuplicateKey, 4, `campo "name" repetido`},
 		{"control character", head + "  - name: \"a\\u001b[31m\"\n    command: x\n", RuleControlCharacter, 3, "name não pode conter caracteres de controle"},
 		{"release key invalid", "version: 1\nkeys:\n  release: x\n", RuleReleaseKeyInvalid, 3, `keys.release inválido: "x" (use a notação do Bubble Tea, por exemplo "ctrl+]")`},
+		{"yaml tag", head + "  - name: a\n    command: !cmd x\n", RuleTagUnsupported, 4, "tags YAML (iniciadas por !) não são suportadas"},
+		{"yaml tag on tools", "version: 1\ntools:\n  !000 00000000", RuleTagUnsupported, 3, "tags YAML (iniciadas por !) não são suportadas"},
 		{"release key empty", "version: 1\nkeys:\n  release: \"\"\n", RuleReleaseKeyInvalid, 3, `keys.release inválido: "" (use a notação do Bubble Tea, por exemplo "ctrl+]")`},
 	}
 	for _, tt := range tests {

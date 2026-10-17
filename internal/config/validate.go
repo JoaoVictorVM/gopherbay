@@ -40,6 +40,7 @@ const (
 	RuleNotAMapping          Rule = "not_a_mapping"
 	RuleFileTooLarge         Rule = "file_too_large"
 	RuleUnreadable           Rule = "unreadable"
+	RuleTagUnsupported       Rule = "tag_unsupported"
 	RuleSyntax               Rule = "syntax"
 	RuleType                 Rule = "type"
 )

@@ -52,7 +52,15 @@ func Parse(data []byte, path string) (Config, error) {
 	return defaultParser().parse(data, path)
 }
 
-func (p configParser) parse(data []byte, path string) (Config, error) {
+func (p configParser) parse(data []byte, path string) (cfg Config, err error) {
+	// The YAML library has panicked on odd inputs found by fuzzing; a broken
+	// config file must open the read-only screen, never crash gbay.
+	defer func() {
+		if r := recover(); r != nil {
+			cfg, err = Config{}, &Error{Kind: KindSyntax, Path: path, Rule: RuleSyntax, Message: "o arquivo não pôde ser interpretado", Violations: 1}
+		}
+	}()
+
 	if len(data) > MaxFileSize {
 		return Config{}, &Error{Kind: KindRead, Path: path, Rule: RuleFileTooLarge, Message: "o arquivo tem mais de 1 MiB", Violations: 1}
 	}
@@ -87,6 +95,12 @@ func (p configParser) parse(data []byte, path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// Tags are never needed in this format, and the decoder crashes on some
+	// custom tags, so they are refused before decoding.
+	if tags := ast.Filter(ast.TagType, body); len(tags) > 0 {
+		first := slices.MinFunc(tags, func(a, b ast.Node) int { return lineOf(a) - lineOf(b) })
+		return Config{}, validationError(path, lineOf(first), RuleTagUnsupported, "tags YAML (iniciadas por !) não são suportadas")
+	}
 	if version < p.current {
 		if err := p.migrate(body, version, lineOf(field(body, "version")), path); err != nil {
 			return Config{}, err
@@ -98,7 +112,7 @@ func (p configParser) parse(data []byte, path string) (Config, error) {
 		return Config{}, yamlError(err, path)
 	}
 
-	cfg := normalize(raw)
+	cfg = normalize(raw)
 	if err := validateFile(&cfg, raw.Keys.Release != nil, body, path); err != nil {
 		return Config{}, err
 	}
