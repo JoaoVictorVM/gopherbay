@@ -39,6 +39,7 @@ const (
 	RuleMultipleDocuments    Rule = "multiple_documents"
 	RuleNotAMapping          Rule = "not_a_mapping"
 	RuleFileTooLarge         Rule = "file_too_large"
+	RuleUnreadable           Rule = "unreadable"
 	RuleSyntax               Rule = "syntax"
 	RuleType                 Rule = "type"
 )
