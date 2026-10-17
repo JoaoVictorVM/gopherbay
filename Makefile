@@ -9,6 +9,8 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%d)
 LDFLAGS := -s -w -X $(VERSION_PKG).Version=$(VERSION) -X $(VERSION_PKG).Commit=$(COMMIT) -X $(VERSION_PKG).Date=$(DATE)
 
+FUZZTIME ?= 30s
+
 GOLANGCI_LINT_VERSION ?= v2.14.0
 GOVULNCHECK_VERSION ?= v1.9.0
 
@@ -26,7 +28,7 @@ RACE ?= $(if $(shell command -v "$$($(GO) env CC)" 2>/dev/null),-race,)
 TEST_CGO := $(if $(RACE),1,0)
 
 .DEFAULT_GOAL := build
-.PHONY: build run test cover lint vuln fmt tools clean
+.PHONY: build run test cover fuzz lint vuln fmt tools clean
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/gbay
@@ -41,6 +43,9 @@ cover:
 	CGO_ENABLED=$(TEST_CGO) $(GO) test $(RACE) -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
 	$(GO) tool cover -func=coverage.out | tail -n 1
 	$(GO) tool cover -html=coverage.out -o coverage.html
+
+fuzz:
+	$(GO) test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=$(FUZZTIME) ./internal/config
 
 lint:
 	@test -x "$(GOLANGCI_LINT)" || { echo "golangci-lint não encontrado em $(TOOLS_DIR): rode make tools primeiro" >&2; exit 1; }
