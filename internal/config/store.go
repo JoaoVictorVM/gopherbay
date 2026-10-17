@@ -109,6 +109,47 @@ func (s *Store) Load() error {
 	return nil
 }
 
+// Save validates tools and atomically replaces the file with them, keeping the
+// loaded release key. On any error the file and the in-memory config stay as
+// they were: ErrReadOnly, *ValidationError or *SaveError.
+func (s *Store) Save(tools []Tool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	start := time.Now()
+	if s.loadErr != nil {
+		s.logger.Warn("config save aborted", "path", s.path, "reason", "read_only")
+		return ErrReadOnly
+	}
+	tools = normalizeTools(tools)
+	if violations := ValidateTools(tools); len(violations) > 0 {
+		s.logger.Warn("config save aborted", "path", s.path, "reason", "invalid")
+		return &ValidationError{Violations: violations}
+	}
+
+	cfg := Config{Version: CurrentVersion, Keys: s.cfg.Keys, Tools: tools}
+	data, err := Marshal(cfg)
+	if err != nil {
+		return s.saveFailed(&SaveError{Op: "serializar", Err: err})
+	}
+	if err := writeFileAtomic(s.path, data, s.logger); err != nil {
+		return s.saveFailed(err)
+	}
+
+	st := stamp{exists: true, sum: sha256.Sum256(data), size: int64(len(data))}
+	if fi, err := os.Stat(s.path); err == nil {
+		st.modTime, st.size = fi.ModTime(), fi.Size()
+	}
+	s.cfg, s.stamp = cfg.Clone(), st
+	s.logger.Info("config saved", "path", s.path, "tools", len(tools), "duration", time.Since(start))
+	return nil
+}
+
+func (s *Store) saveFailed(err error) error {
+	s.logger.Error("config save failed", "path", s.path, "error", err)
+	return err
+}
+
 func (s *Store) read() ([]byte, stamp, *Error) {
 	readErr := func(rule Rule, msg string, err error) *Error {
 		return &Error{Kind: KindRead, Path: s.path, Rule: rule, Message: msg, Violations: 1, Err: err}
