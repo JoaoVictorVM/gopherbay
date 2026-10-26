@@ -22,6 +22,7 @@ linters:
       # misspell only knows English and flags the pt-BR messages shown to the user.
       ignore-rules:
         - argumentos
+        - comando
     nolintlint:
       require-explanation: true
       require-specific: true

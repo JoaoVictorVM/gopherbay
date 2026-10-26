@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/JoaoVictorVM/gopherbay/internal/logging"
 )
 
@@ -62,6 +64,28 @@ func TestRun_QuitsOnQ(t *testing.T) {
 	for _, want := range []string{`msg="starting gbay"`, `msg="gbay exited"`, "duration="} {
 		if !strings.Contains(res.log, want) {
 			t.Errorf("log = %q, want %q", res.log, want)
+		}
+	}
+}
+
+func TestRun_QuitsOnCtrlC(t *testing.T) {
+	res := runApp(context.Background(), t, Options{}, "\x03")
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	if !strings.Contains(res.log, `msg="gbay exited"`) {
+		t.Fatal("Ctrl+C did not complete program lifecycle")
+	}
+}
+
+func TestRun_LeavesAlternateScreen(t *testing.T) {
+	for _, keys := range []string{"q", "\x03"} {
+		res := runApp(context.Background(), t, Options{}, keys)
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		if !strings.Contains(res.output, "\x1b[?1049l") {
+			t.Fatalf("quit %q did not leave alternate screen: %q", keys, res.output)
 		}
 	}
 }
@@ -359,5 +383,37 @@ func TestRun_NoFilesInWorkingDir(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("working folder has %d entries, want none", len(entries))
+	}
+}
+
+func TestProgram_SidebarNavigation(t *testing.T) {
+	for _, keys := range []string{"jq", "j?jkq"} {
+		t.Run(keys, func(t *testing.T) {
+			runSidebarProgram(t, keys)
+		})
+	}
+}
+
+func runSidebarProgram(t *testing.T, keys string) {
+	t.Helper()
+	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("Relógio", "Snake")})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	var out bytes.Buffer
+	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithoutSignalHandler(), tea.WithInput(pr), tea.WithOutput(&out), tea.WithWindowSize(120, 30))
+	go func() { _, _ = pw.Write([]byte(keys)) }()
+	final, err := p.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := final.(*model)
+	tool, ok := got.selectedTool()
+	if !ok || tool.Name != "Snake" {
+		t.Fatalf("program did not navigate: %+v, %v", tool, ok)
+	}
+	if !strings.Contains(out.String(), "\x1b[?1049l") {
+		t.Fatalf("program did not leave alternate screen: %q", out.String())
 	}
 }
