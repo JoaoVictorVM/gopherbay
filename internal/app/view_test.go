@@ -1,7 +1,11 @@
 package app
 
 import (
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -10,6 +14,8 @@ import (
 
 	"github.com/JoaoVictorVM/gopherbay/internal/config"
 )
+
+var updateGolden = flag.Bool("update-golden", false, "rewrite UI golden files for explicit review")
 
 func assertViewFits(t *testing.T, m *model) {
 	t.Helper()
@@ -224,5 +230,58 @@ func TestPane_ConfigErrorPresentation(t *testing.T) {
 	}
 	if strings.Contains(content, emptyToolList) || store.err.Message != "bad \x1b[2J control" {
 		t.Fatal("error was hidden or mutated")
+	}
+}
+
+// Run go test ./internal/app -run '^TestView_Golden$' -update-golden to
+// deliberately replace expected frames, then inspect their diff before committing.
+func TestView_Golden(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		width, height int
+		store         *fakeStore
+		help          bool
+	}{
+		{"sidebar_details", 120, 30, &fakeStore{cfg: configWith("Relógio", "Snake", "Curso")}, false},
+		{"empty", 120, 30, &fakeStore{cfg: config.Empty()}, false},
+		{"too_small_width", 59, 20, &fakeStore{cfg: configWith("Relógio")}, false},
+		{"too_small_height", 80, 15, &fakeStore{cfg: configWith("Relógio")}, false},
+		{"help", 120, 30, &fakeStore{cfg: config.Empty()}, true},
+		{"read_only", 120, 30, readOnlyStore(12), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := newTestModelWith(t, tt.store)
+			m.Update(tea.WindowSizeMsg{Width: tt.width, Height: tt.height})
+			if tt.help {
+				press(m, "?")
+			}
+			content := m.View().Content
+			if tt.name == "sidebar_details" && (!strings.Contains(content, "\x1b[1") || !strings.Contains(content, "▸")) {
+				t.Fatal("reference frame lost bold styling or selected marker")
+			}
+			// Quoting each line makes ANSI and trailing padding visible in reviews.
+			lines := strings.Split(content, "\n")
+			for i, line := range lines {
+				lines[i] = strconv.Quote(line)
+			}
+			got := strings.Join(lines, "\n") + "\n"
+			path := filepath.Join("testdata", "golden", tt.name+".golden")
+			if *updateGolden {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(got), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.ReplaceAll(string(want), "\r\n", "\n") != got {
+				t.Errorf("frame differs from %s; inspect output before explicitly updating\n%s", path, got)
+			}
+			assertViewFits(t, m)
+		})
 	}
 }

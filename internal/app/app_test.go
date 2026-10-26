@@ -68,6 +68,28 @@ func TestRun_QuitsOnQ(t *testing.T) {
 	}
 }
 
+func TestRun_QuitsOnCtrlC(t *testing.T) {
+	res := runApp(context.Background(), t, Options{}, "\x03")
+	if res.err != nil {
+		t.Fatalf("Run() error = %v", res.err)
+	}
+	if !strings.Contains(res.log, `msg="gbay exited"`) {
+		t.Fatal("Ctrl+C did not complete program lifecycle")
+	}
+}
+
+func TestRun_LeavesAlternateScreen(t *testing.T) {
+	for _, keys := range []string{"q", "\x03"} {
+		res := runApp(context.Background(), t, Options{}, keys)
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		if !strings.Contains(res.output, "\x1b[?1049l") {
+			t.Fatalf("quit %q did not leave alternate screen: %q", keys, res.output)
+		}
+	}
+}
+
 func TestRun_RotatesLog(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, logging.FileName), []byte("previous run\n"), 0o600); err != nil {
