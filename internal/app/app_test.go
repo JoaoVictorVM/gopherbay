@@ -365,6 +365,15 @@ func TestRun_NoFilesInWorkingDir(t *testing.T) {
 }
 
 func TestProgram_SidebarNavigation(t *testing.T) {
+	for _, keys := range []string{"jq", "j?jkq"} {
+		t.Run(keys, func(t *testing.T) {
+			runSidebarProgram(t, keys)
+		})
+	}
+}
+
+func runSidebarProgram(t *testing.T, keys string) {
+	t.Helper()
 	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("Relógio", "Snake")})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -372,7 +381,7 @@ func TestProgram_SidebarNavigation(t *testing.T) {
 	defer pw.Close()
 	var out bytes.Buffer
 	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithoutSignalHandler(), tea.WithInput(pr), tea.WithOutput(&out), tea.WithWindowSize(120, 30))
-	go func() { _, _ = pw.Write([]byte("jq")) }()
+	go func() { _, _ = pw.Write([]byte(keys)) }()
 	final, err := p.Run()
 	if err != nil {
 		t.Fatal(err)

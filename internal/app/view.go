@@ -9,11 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-const (
-	smallTerminalMessage = "Aumente o terminal (mínimo 60×16)"
-	sidebarShortcuts     = "↑↓ navegar · enter rodar · a add · e editar · d remover · ? ajuda · q sair"
-	compactShortcuts     = "↑↓ navegar · enter rodar · ? ajuda · q sair"
-)
+const smallTerminalMessage = "Aumente o terminal (mínimo 60×16)"
 
 func fitLine(s string, width int) string {
 	if width <= 0 {
@@ -53,10 +49,14 @@ func (m *model) View() tea.View {
 		return v
 	}
 	sidebar := m.styles.border.Render(strings.Join(m.sidebarLines(l.sidebarInner.width, l.sidebarInner.height), "\n"))
-	pane := m.styles.border.Render(viewport(m.paneLines(l.paneInner.width), m.paneOffset, l.paneInner.width, l.paneInner.height))
-	foot := sidebarShortcuts
-	if ansi.StringWidth(foot) > m.width {
-		foot = compactShortcuts
+	lines, offset := m.paneLines(l.paneInner.width), m.paneOffset
+	if m.helpOpen {
+		lines, offset = m.helpLines(l.paneInner.width), m.helpOffset
+	}
+	pane := m.styles.border.Render(viewport(lines, offset, l.paneInner.width, l.paneInner.height))
+	foot := m.footer("sidebar", m.width)
+	if m.helpOpen {
+		foot = "↑↓ rolar · ?/esc voltar · q sair"
 	}
 	v.Content = strings.Join([]string{
 		fitLine(m.styles.title.Render(title), m.width),

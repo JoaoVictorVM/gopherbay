@@ -2,6 +2,7 @@ package app
 
 import (
 	"log/slog"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -47,6 +48,9 @@ type model struct {
 	selected      int
 	sidebarOffset int
 	paneOffset    int
+	helpOpen      bool
+	helpOffset    int
+	reloading     bool
 	styles        styles
 }
 
@@ -78,6 +82,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		default:
 			if calculateLayout(m.width, m.height).valid {
+				if m.handleHelpKey(msg.String()) {
+					return m, nil
+				}
 				switch msg.String() {
 				case "up", "k":
 					m.moveSelection(-1)
@@ -91,14 +98,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case configLoadedMsg:
+		previous, hadSelection := m.selectedTool()
+		previousIndex := m.selected
 		m.cfg, m.loadErr = msg.cfg, msg.err
+		m.reloading = false
 		m.status = ""
 		if msg.err == nil {
 			m.status = reloadedStatus
 		}
 		m.selected = -1
 		if msg.err == nil && len(m.cfg.Tools) > 0 {
-			m.selected = 0
+			m.selected = max(0, min(previousIndex, len(m.cfg.Tools)-1))
+			if hadSelection {
+				for i, tool := range m.cfg.Tools {
+					if strings.EqualFold(tool.Name, previous.Name) {
+						m.selected = i
+						break
+					}
+				}
+			}
 		}
 		m.sidebarOffset, m.paneOffset = 0, 0
 		m.clampOffsets()
@@ -111,6 +129,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) reload() tea.Cmd {
+	if m.reloading {
+		return nil
+	}
+	m.reloading = true
 	store := m.store
 	return func() tea.Msg {
 		_ = store.Load()

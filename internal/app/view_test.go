@@ -143,3 +143,86 @@ func TestView_UnknownSize(t *testing.T) {
 		t.Fatalf("unknown-size view = %+v", v)
 	}
 }
+
+func TestHelp_FourContexts(t *testing.T) {
+	m, _ := newTestModel(t)
+	press(m, "?")
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"Sidebar", "Ferramenta em execução", "Prompt de pasta", "Formulário", "k/j", "ctrl+c", "K/J", "shift+tab", "n/esc"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("help missing %q: %s", want, content)
+		}
+	}
+}
+
+func TestHelp_UsesReloadedReleaseKey(t *testing.T) {
+	cfg := config.Empty()
+	cfg.Keys.Release = "ctrl+]"
+	store := &fakeStore{cfg: config.Empty(), results: []fakeLoad{{cfg: cfg}}}
+	m, _ := newTestModelWith(t, store)
+	press(m, "?")
+	m.Update(press(m, "r")())
+	content := ansi.Strip(m.View().Content)
+	if !m.helpOpen || !strings.Contains(content, "ctrl+]") || strings.Contains(content, `ctrl+\`) {
+		t.Fatalf("help did not use reloaded key: %s", content)
+	}
+	if got := m.footer("session", 60); got != "ctrl+] encerrar ferramenta" {
+		t.Fatalf("session footer = %q", got)
+	}
+}
+
+func TestHelp_ScrollAtMinimumSize(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 16})
+	press(m, "?")
+	if strings.Contains(ansi.Strip(m.View().Content), "cancelar remoção") {
+		t.Fatal("test needs help longer than viewport")
+	}
+	for range 10 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	if content := ansi.Strip(m.View().Content); !strings.Contains(content, "n/esc:") || !strings.Contains(content, "remoção") {
+		t.Fatalf("last help entry inaccessible: %s", content)
+	}
+	assertViewFits(t, m)
+	for range 100 {
+		press(m, "k")
+	}
+	if m.helpOffset != 0 || !strings.Contains(ansi.Strip(m.View().Content), "Ajuda") {
+		t.Fatal("help cannot return to first line")
+	}
+}
+
+func TestView_FooterFits(t *testing.T) {
+	m, _ := newTestModel(t)
+	for _, context := range []string{"sidebar", "session", "folder", "form"} {
+		for _, width := range []int{60, 80, 120} {
+			footer := m.footer(context, width)
+			if strings.Contains(footer, "\n") || ansi.StringWidth(footer) > width {
+				t.Errorf("%s footer does not fit %d: %q", context, width, footer)
+			}
+		}
+	}
+	if got := m.footer("sidebar", 120); got != "↑↓ navegar · enter rodar · a add · e editar · d remover · ? ajuda · q sair" {
+		t.Fatalf("full footer = %q", got)
+	}
+	if got := m.footer("sidebar", 60); got != "↑↓ navegar · enter rodar · ? ajuda · q sair" {
+		t.Fatalf("compact footer = %q", got)
+	}
+}
+
+func TestPane_ConfigErrorPresentation(t *testing.T) {
+	store := readOnlyStore(12)
+	store.err.Message = "bad \x1b[2J control"
+	store.err.Path = ""
+	m, _ := newTestModelWith(t, store)
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"linha 12", "bad �[2J control", `Arquivo: C:\cfg\config.yaml`, readOnlyHint} {
+		if !strings.Contains(content, want) {
+			t.Errorf("diagnostic missing %q: %q", want, content)
+		}
+	}
+	if strings.Contains(content, emptyToolList) || store.err.Message != "bad \x1b[2J control" {
+		t.Fatal("error was hidden or mutated")
+	}
+}

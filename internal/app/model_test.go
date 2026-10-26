@@ -116,7 +116,7 @@ func TestModel_ViewEmptyState(t *testing.T) {
 
 	v := m.View()
 
-	for _, want := range []string{"gopherbay", emptyToolList, sidebarShortcuts} {
+	for _, want := range []string{"gopherbay", emptyToolList, m.footer("sidebar", m.width)} {
 		if !strings.Contains(v.Content, want) {
 			t.Errorf("View().Content = %q, want it to contain %q", v.Content, want)
 		}
@@ -371,5 +371,106 @@ func TestModel_SelectedToolSnapshot(t *testing.T) {
 	tool.Name = "changed"
 	if m.cfg.Tools[0].Name != "Curso" {
 		t.Fatal("selected record aliases model")
+	}
+}
+
+func TestModel_ReloadReconcilesSelection(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		names []string
+		want  int
+	}{
+		{"same name ignoring case", []string{"B", "a", "c"}, 0},
+		{"removed middle", []string{"a", "c"}, 1},
+		{"clamp last", []string{"a"}, 0},
+		{"empty", nil, -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeStore{cfg: configWith("a", "b", "c"), results: []fakeLoad{{cfg: configWith(tt.names...)}}}
+			m, _ := newTestModelWith(t, store)
+			press(m, "j")
+			m.Update(press(m, "r")())
+			if m.selected != tt.want {
+				t.Fatalf("selected = %d, want %d", m.selected, tt.want)
+			}
+		})
+	}
+}
+
+func TestModel_ReloadSingleFlight(t *testing.T) {
+	store := &fakeStore{cfg: configWith("a")}
+	m, _ := newTestModelWith(t, store)
+	cmd := press(m, "r")
+	if cmd == nil || !m.reloading || store.loads != 0 {
+		t.Fatal("reload must be pending without synchronous I/O")
+	}
+	for range 3 {
+		if press(m, "r") != nil {
+			t.Fatal("concurrent reload scheduled")
+		}
+	}
+	m.Update(cmd())
+	if m.reloading || store.loads != 1 || press(m, "r") == nil {
+		t.Fatal("reload did not become available after completion")
+	}
+}
+
+func TestModel_HelpRouting(t *testing.T) {
+	for _, closeKey := range []tea.KeyPressMsg{{Code: '?', Text: "?"}, {Code: tea.KeyEscape}} {
+		m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("a", "b")})
+		press(m, "j")
+		press(m, "?")
+		if !m.helpOpen {
+			t.Fatal("help did not open")
+		}
+		press(m, "j")
+		press(m, "k")
+		if m.selected != 1 {
+			t.Fatal("help navigation changed selected tool")
+		}
+		m.Update(closeKey)
+		if m.helpOpen || !strings.Contains(ansi.Strip(m.View().Content), "Comando: x") {
+			t.Fatal("help did not restore details")
+		}
+	}
+}
+
+func TestModel_ReadOnlyWithHelp(t *testing.T) {
+	m, _ := newTestModelWith(t, readOnlyStore(12))
+	press(m, "?")
+	for _, key := range []string{"a", "e", "d", "K", "J"} {
+		press(m, key)
+		if m.status != readOnlyStatus || m.selected != -1 || m.store.(*fakeStore).loads != 0 {
+			t.Fatalf("read-only help allowed action %s", key)
+		}
+	}
+	assertQuits(t, press(m, "q"))
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	assertQuits(t, cmd)
+	press(m, "?")
+	if m.helpOpen || !strings.Contains(ansi.Strip(m.View().Content), "Erro no config.yaml") {
+		t.Fatal("closing help lost diagnostic")
+	}
+}
+
+func TestModel_SmallTerminalPreservesState(t *testing.T) {
+	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("a", "b")})
+	press(m, "j")
+	press(m, "?")
+	m.Update(tea.WindowSizeMsg{Width: 59, Height: 20})
+	press(m, "k")
+	press(m, "?")
+	if m.selected != 1 || !m.helpOpen {
+		t.Fatal("small terminal changed navigation context")
+	}
+	assertQuits(t, press(m, "q"))
+	cmd := press(m, "r")
+	if cmd == nil {
+		t.Fatal("small terminal blocked reload")
+	}
+	m.Update(cmd())
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 16})
+	if m.selected != 1 || !m.helpOpen {
+		t.Fatal("restored terminal lost context")
 	}
 }

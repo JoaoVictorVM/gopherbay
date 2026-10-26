@@ -41,6 +41,7 @@ func (m *model) clampOffsets() {
 		}
 	}
 	m.paneOffset = max(0, min(m.paneOffset, len(m.paneLines(l.paneInner.width))-l.paneInner.height))
+	m.helpOffset = max(0, min(m.helpOffset, len(m.helpLines(l.paneInner.width))-l.paneInner.height))
 }
 
 func (m *model) sidebarLines(width, height int) []string {
