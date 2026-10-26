@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/JoaoVictorVM/gopherbay/internal/logging"
 )
 
@@ -359,5 +361,28 @@ func TestRun_NoFilesInWorkingDir(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("working folder has %d entries, want none", len(entries))
+	}
+}
+
+func TestProgram_SidebarNavigation(t *testing.T) {
+	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("Relógio", "Snake")})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	var out bytes.Buffer
+	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithoutSignalHandler(), tea.WithInput(pr), tea.WithOutput(&out), tea.WithWindowSize(120, 30))
+	go func() { _, _ = pw.Write([]byte("jq")) }()
+	final, err := p.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := final.(*model)
+	tool, ok := got.selectedTool()
+	if !ok || tool.Name != "Snake" {
+		t.Fatalf("program did not navigate: %+v, %v", tool, ok)
+	}
+	if !strings.Contains(out.String(), "\x1b[?1049l") {
+		t.Fatalf("program did not leave alternate screen: %q", out.String())
 	}
 }

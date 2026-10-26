@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/JoaoVictorVM/gopherbay/internal/config"
 )
@@ -56,7 +57,9 @@ func newTestModelWith(t *testing.T, store *fakeStore) (*model, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return newModel(logger, time.Now(), store), &buf
+	m := newModel(logger, time.Now(), store)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	return m, &buf
 }
 
 func newTestModel(t *testing.T) (*model, *bytes.Buffer) {
@@ -108,12 +111,12 @@ func TestModel_IgnoresOtherKeys(t *testing.T) {
 	}
 }
 
-func TestModel_ViewPlaceholder(t *testing.T) {
+func TestModel_ViewEmptyState(t *testing.T) {
 	m, _ := newTestModel(t)
 
 	v := m.View()
 
-	for _, want := range []string{"gopherbay", "Nenhuma ferramenta cadastrada.", "Aperte r para recarregar ou q para sair."} {
+	for _, want := range []string{"gopherbay", emptyToolList, sidebarShortcuts} {
 		if !strings.Contains(v.Content, want) {
 			t.Errorf("View().Content = %q, want it to contain %q", v.Content, want)
 		}
@@ -155,11 +158,14 @@ func TestModel_WindowSizeLogged(t *testing.T) {
 func TestModel_ListsToolsInOrder(t *testing.T) {
 	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("Relógio", "Snake", "Curso")})
 
-	content := m.View().Content
-
-	want := "gopherbay\n\nRelógio\nSnake\nCurso\n\nAperte r para recarregar ou q para sair."
-	if content != want {
-		t.Errorf("View().Content = %q, want %q", content, want)
+	content := ansi.Strip(m.View().Content)
+	previous := -1
+	for _, name := range []string{"Relógio", "Snake", "Curso"} {
+		index := strings.Index(content, name)
+		if index <= previous {
+			t.Errorf("tool %q out of order: %q", name, content)
+		}
+		previous = index
 	}
 }
 
@@ -180,15 +186,11 @@ func press(m *model, key string) tea.Cmd {
 func TestModel_ReadOnlyView(t *testing.T) {
 	m, _ := newTestModelWith(t, readOnlyStore(12))
 
-	content := m.View().Content
-
-	want := "gopherbay\n\n" +
-		"Erro no config.yaml (linha 12): value is not allowed in this context\n" +
-		`Arquivo: C:\cfg\config.yaml` + "\n\n" +
-		"Corrija o arquivo e aperte r para recarregar\n\n" +
-		"Aperte r para recarregar ou q para sair."
-	if content != want {
-		t.Errorf("View().Content = %q, want %q", content, want)
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{m.loadErr.Error(), `Arquivo: C:\cfg\config.yaml`, readOnlyHint} {
+		if !strings.Contains(content, want) {
+			t.Errorf("View().Content = %q, want %q", content, want)
+		}
 	}
 }
 
@@ -196,8 +198,10 @@ func TestModel_ReadOnlyReadError(t *testing.T) {
 	store := &fakeStore{path: "/cfg/config.yaml", cfg: config.Empty(), err: &config.Error{Kind: config.KindRead, Path: "/cfg/config.yaml", Message: "permission denied"}}
 	m, _ := newTestModelWith(t, store)
 
-	if content := m.View().Content; !strings.Contains(content, "Não foi possível ler o config.yaml: permission denied\nArquivo: /cfg/config.yaml") {
-		t.Errorf("View().Content = %q, want the read error and the path", content)
+	for _, want := range []string{"Não foi possível ler o config.yaml: permission denied", "Arquivo: /cfg/config.yaml"} {
+		if content := ansi.Strip(m.View().Content); !strings.Contains(content, want) {
+			t.Errorf("View().Content = %q, want %q", content, want)
+		}
 	}
 }
 
@@ -211,7 +215,7 @@ func TestModel_ReadOnlyBlocksEditKeys(t *testing.T) {
 				t.Errorf("Update(%q) cmd != nil, want nil", key)
 			}
 
-			if !strings.HasSuffix(m.View().Content, "\n\nConfig inválido: corrija o arquivo e aperte r para recarregar") {
+			if !strings.Contains(ansi.Strip(m.View().Content), readOnlyStatus) {
 				t.Errorf("View().Content = %q, want the read-only status", m.View().Content)
 			}
 			if store.loads != 0 {
@@ -229,8 +233,8 @@ func TestModel_EditKeysIgnoredInNormalMode(t *testing.T) {
 			t.Errorf("Update(%q) cmd != nil, want nil", key)
 		}
 	}
-	if !strings.HasSuffix(m.View().Content, "Aperte r para recarregar ou q para sair.") {
-		t.Errorf("View().Content = %q, want the default status", m.View().Content)
+	if m.status != "" {
+		t.Errorf("status = %q, want empty", m.status)
 	}
 }
 
@@ -265,9 +269,10 @@ func TestModel_ReloadFixesReadOnly(t *testing.T) {
 
 	m.Update(press(m, "r")())
 
-	want := "gopherbay\n\nRelógio\nSnake\n\nConfig recarregado"
-	if content := m.View().Content; content != want {
-		t.Errorf("View().Content = %q, want %q", content, want)
+	for _, want := range []string{"Relógio", "Snake", reloadedStatus} {
+		if content := ansi.Strip(m.View().Content); !strings.Contains(content, want) {
+			t.Errorf("View().Content = %q, want %q", content, want)
+		}
 	}
 }
 
@@ -283,7 +288,7 @@ func TestModel_ReloadKeepsReadOnlyWithNewError(t *testing.T) {
 	if !strings.Contains(content, "Erro no config.yaml (linha 9): ") || strings.Contains(content, "(linha 3)") {
 		t.Errorf("View().Content = %q, want the new error only", content)
 	}
-	if !strings.HasSuffix(content, "Aperte r para recarregar ou q para sair.") {
+	if m.status != "" {
 		t.Errorf("View().Content = %q, want the status cleared", content)
 	}
 }
@@ -306,4 +311,65 @@ func TestModel_QuitInReadOnly(t *testing.T) {
 	assertQuits(t, press(m, "q"))
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	assertQuits(t, cmd)
+}
+
+func TestModel_InitialSelection(t *testing.T) {
+	m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("Relógio", "Snake")})
+	tool, ok := m.selectedTool()
+	if !ok || tool.Name != "Relógio" || m.selected != 0 {
+		t.Fatalf("initial selection = %+v, %v, index %d", tool, ok, m.selected)
+	}
+}
+
+func TestModel_NavigationClamps(t *testing.T) {
+	for _, keys := range [][]tea.KeyPressMsg{
+		{{Code: tea.KeyDown}, {Code: tea.KeyUp}},
+		{{Code: 'j', Text: "j"}, {Code: 'k', Text: "k"}},
+	} {
+		m, _ := newTestModelWith(t, &fakeStore{cfg: configWith("a", "b", "c")})
+		for range 5 {
+			m.Update(keys[0])
+		}
+		if m.selected != 2 {
+			t.Fatalf("down wrapped: %d", m.selected)
+		}
+		for range 5 {
+			m.Update(keys[1])
+		}
+		if m.selected != 0 {
+			t.Fatalf("up wrapped: %d", m.selected)
+		}
+		press(m, "J")
+		press(m, "K")
+		if m.selected != 0 {
+			t.Fatal("uppercase shortcuts moved selection")
+		}
+	}
+}
+
+func TestModel_EmptySelection(t *testing.T) {
+	for _, store := range []*fakeStore{{cfg: config.Empty()}, readOnlyStore(3)} {
+		m, _ := newTestModelWith(t, store)
+		press(m, "j")
+		press(m, "k")
+		if tool, ok := m.selectedTool(); ok || tool != (config.Tool{}) || m.selected != -1 {
+			t.Fatalf("unexpected selection: %+v, %v, %d", tool, ok, m.selected)
+		}
+	}
+}
+
+func TestModel_SelectedToolSnapshot(t *testing.T) {
+	cfg := configWith("Curso")
+	cfg.Tools[0].Command = "curso --lista"
+	cfg.Tools[0].Description = "Controle de cursos"
+	cfg.Tools[0].Dir = config.Dir{Mode: config.ModeFixed, Path: `D:\projetos\curso`}
+	m, _ := newTestModelWith(t, &fakeStore{cfg: cfg})
+	tool, ok := m.selectedTool()
+	if !ok || tool != cfg.Tools[0] {
+		t.Fatalf("incomplete selected record: %+v", tool)
+	}
+	tool.Name = "changed"
+	if m.cfg.Tools[0].Name != "Curso" {
+		t.Fatal("selected record aliases model")
+	}
 }
